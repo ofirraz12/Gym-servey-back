@@ -1,23 +1,45 @@
 const express = require("express");
 const router = express.Router();
-const pool = require("../db");
+const fs = require("fs");
+const path = require("path");
 const nodemailer = require("nodemailer");
 const { google } = require("googleapis");
 require("dotenv").config();
 
-// Google OAuth2 Credentials
+// 📁 Path to surveys.json file
+const surveyFilePath = path.join(__dirname, "../data/surveys.json");
+
+// 🛠 Function to Read Existing Surveys
+const readSurveys = () => {
+  try {
+    if (!fs.existsSync(surveyFilePath)) return [];
+    const data = fs.readFileSync(surveyFilePath, "utf8");
+    return JSON.parse(data);
+  } catch (err) {
+    console.error("❌ Error reading surveys.json:", err);
+    return [];
+  }
+};
+
+// 🛠 Function to Save Surveys to JSON File
+const saveSurveys = (surveys) => {
+  try {
+    fs.writeFileSync(surveyFilePath, JSON.stringify(surveys, null, 2), "utf8");
+  } catch (err) {
+    console.error("❌ Error saving surveys.json:", err);
+  }
+};
+
+// 🔑 Google OAuth2 Credentials
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const REDIRECT_URI = "https://developers.google.com/oauthplayground";
+const REDIRECT_URI = process.env.REDIRECT_URI;
 const REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN;
 
-const oAuth2Client = new google.auth.OAuth2(
-  CLIENT_ID,
-  CLIENT_SECRET,
-  REDIRECT_URI
-);
+const oAuth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
 oAuth2Client.setCredentials({ refresh_token: REFRESH_TOKEN });
 
+// 📧 Function to Send Email
 const sendEmail = async (email) => {
   try {
     console.log("📧 Attempting to send email to:", email);
@@ -35,9 +57,9 @@ const sendEmail = async (email) => {
       auth: {
         type: "OAuth2",
         user: process.env.EMAIL_USER,
-        clientId: process.env.GOOGLE_CLIENT_ID,
-        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-        refreshToken: process.env.GOOGLE_REFRESH_TOKEN,
+        clientId: CLIENT_ID,
+        clientSecret: CLIENT_SECRET,
+        refreshToken: REFRESH_TOKEN,
         accessToken: accessTokenResponse.token,
       },
     });
@@ -51,26 +73,17 @@ const sendEmail = async (email) => {
 המשך יום נהדר! 😊
 
 🔹 קוד ההנחה שלך: GYM20`,
-     };
+    };
 
     console.log("🚀 Sending email now...");
     const result = await transporter.sendMail(mailOptions);
     console.log("✅ Email sent successfully:", result);
   } catch (error) {
     console.error("❌ Error sending email:", error);
-
-    // Log detailed error info
-    if (error.response) {
-      console.error("📌 Google API Error Response:", error.response.data);
-    }
-    if (error.config) {
-      console.error("📌 Google API Error Config:", error.config);
-    }
   }
 };
 
-
-// 🛠️ API Route: Save survey responses & send email
+// 📌 API Route: Save Survey Responses & Send Email
 router.post("/submit", async (req, res) => {
   const {
     age,
@@ -78,7 +91,7 @@ router.post("/submit", async (req, res) => {
     trainingPlan,
     beginnerHelp,
     aiHelp,
-    teenSocial,
+    Social,
     trainingChallenge,
     researchInterest,
     email,
@@ -87,26 +100,41 @@ router.post("/submit", async (req, res) => {
   try {
     console.log("📝 Received survey submission for:", email);
 
-    // Insert new survey response first
-    const result = await pool.query(
-      `INSERT INTO surveys (age, training_duration, training_plan, beginner_help, ai_help, teen_social, training_challenge, research_interest, email) 
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [age, trainingDuration, trainingPlan, beginnerHelp, aiHelp, teenSocial, trainingChallenge, researchInterest, email]
-    );
+    // 📂 Read existing surveys from JSON file
+    let surveys = readSurveys();
 
-    console.log("✅ Survey data saved to database.");
+    // 🧐 Check if email already exists
+    const existingUser = surveys.find((s) => s.email === email);
 
-    // Now check if the email exists and send email
-    const existingUser = await pool.query("SELECT * FROM surveys WHERE email = $1", [email]);
-
-    if (existingUser.rows.length > 0) {
-      console.log("📧 Email exists, sending thank you email...");
-      await sendEmail(email);
-    } else {
-      console.log("❌ Email check failed after insert.");
+    if (existingUser) {
+      console.log("🔹 Email already exists, skipping duplicate submission.");
+      return res.status(400).json({ error: "Email already submitted." });
     }
 
-    res.json({ success: true, survey: result.rows[0] });
+    // 📌 Create new survey object
+    const newSurvey = {
+      age,
+      trainingDuration,
+      trainingPlan,
+      beginnerHelp,
+      aiHelp,
+      Social,
+      trainingChallenge,
+      researchInterest,
+      email,
+      submittedAt: new Date().toISOString(),
+    };
+
+    // ➕ Add new survey to array & save to JSON file
+    surveys.push(newSurvey);
+    saveSurveys(surveys);
+
+    console.log("✅ Survey data saved to surveys.json");
+
+    // 📧 Send thank-you email
+    await sendEmail(email);
+
+    res.json({ success: true, survey: newSurvey });
   } catch (err) {
     console.error("❌ Error handling survey submission:", err);
     res.status(500).json({ error: "Failed to process the survey." });
